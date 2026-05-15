@@ -1,0 +1,71 @@
+name: Build and Push Backend + Worker Images
+
+on:
+  push:
+    branches:
+      - master
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+      contents: read
+
+    env:
+      AWS_REGION: ap-south-1
+      BACKEND_ECR_REPO: legal-audit-uat-backend
+      WORKER_ECR_REPO: legal-audit-uat-worker
+      IMAGE_TAG: updated
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # ---------------- BACKEND ----------------
+      - name: Build Backend Docker Image
+        run: |
+          docker build \
+            -t ${{ env.BACKEND_ECR_REPO }}:${{ env.IMAGE_TAG }} \
+            -f Dockerfile .
+
+      - name: Tag Backend Image
+        run: |
+          docker tag \
+            ${{ env.BACKEND_ECR_REPO }}:${{ env.IMAGE_TAG }} \
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.BACKEND_ECR_REPO }}:${{ env.IMAGE_TAG }}
+
+      - name: Push Backend Image
+        run: |
+          docker push \
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.BACKEND_ECR_REPO }}:${{ env.IMAGE_TAG }}
+
+      # ---------------- WORKER ----------------
+      - name: Build Worker Docker Image
+        run: |
+          docker build \
+            -t ${{ env.WORKER_ECR_REPO }}:${{ env.IMAGE_TAG }} \
+            -f Dockerfile.worker .
+
+      - name: Tag Worker Image
+        run: |
+          docker tag \
+            ${{ env.WORKER_ECR_REPO }}:${{ env.IMAGE_TAG }} \
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.WORKER_ECR_REPO }}:${{ env.IMAGE_TAG }}
+
+      - name: Push Worker Image
+        run: |
+          docker push \
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.WORKER_ECR_REPO }}:${{ env.IMAGE_TAG }}
