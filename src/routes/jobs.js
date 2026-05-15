@@ -6,36 +6,60 @@ import { queueManager, addSSEClient, removeSSEClient, getJobStatus, setJobStatus
 import { getDocumentAnalysis } from '../services/claudeService.js';
 import { analyzePdf } from '../services/pdfChunkService.js';
 
-// ─────────────────────────────────────────────────────────────────────────────
-// CHANGES FROM PREVIOUS VERSION
-//
-// REMOVED:
-//   - POST /:jobId/presign-upload  — no longer generates S3 presigned upload URLs
-//   - GET  /:jobId/download        — no longer returns a presigned download URL
-//   - Imports of getSignedDownloadUrl, getSignedUploadUrl from s3Service
-//   - Import of confirm-upload (was only needed for the presign flow)
-//
-// REPLACED WITH:
-//   - POST /:jobId/upload          — now the primary upload path (streams via backend)
-//   - GET  /:jobId/download        — streams the report file back through Express
-//                                    (S3 never touches the browser directly)
-//
-// WHY: S3 presigned URLs bypass backend auth and are shareable/leakable.
-// Routing through the backend keeps S3 100% private and enforces access control
-// on every request without any URL expiry management.
-// ─────────────────────────────────────────────────────────────────────────────
-
 const router = express.Router();
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Auth middleware
+// Validates the Bearer token on every /api/jobs/* request.
+// For SSE (/events), EventSource cannot send headers so the token is
+// accepted as a query param:  GET /api/jobs/:id/events?token=<jwt>
+// ─────────────────────────────────────────────────────────────────────────────
+function authenticate(req, res, next) {
+  try {
+    // Accept token from Authorization header OR from ?token= query param (SSE)
+    let token = null;
+
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      token = authHeader.split(' ')[1];
+    } else if (req.query.token) {
+      token = req.query.token;
+    }
+
+    if (!token) {
+      return res.status(401).json({ error: 'No token provided' });
+    }
+
+    const decoded = JSON.parse(Buffer.from(token, 'base64').toString());
+
+    if (!decoded.exp || decoded.exp < Date.now()) {
+      return res.status(401).json({ error: 'Token expired' });
+    }
+
+    req.user = { email: decoded.email, role: decoded.role };
+    next();
+  } catch {
+    return res.status(401).json({ error: 'Invalid token' });
+  }
+}
+
+// Apply auth to all routes in this router
+router.use(authenticate);
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Create a new job
+// ─────────────────────────────────────────────────────────────────────────────
 router.post('/create', async (req, res) => {
   try {
     const jobId = `${new Date().toISOString().split('T')[0].replace(/-/g, '')}_${Date.now()}_${uuidv4().slice(0, 8)}`;
     const jobData = {
-      id: jobId, status: 'created',
+      id: jobId,
+      status: 'created',
       createdAt: new Date().toISOString(),
-      createdBy: req.body.userEmail || 'unknown',
-      totalDocuments: 0, processedCount: 0, failedCount: 0
+      createdBy: req.body.userEmail || req.user.email || 'unknown',
+      totalDocuments: 0,
+      processedCount: 0,
+      failedCount: 0
     };
     await putJsonToS3(`jobs/${jobId}/metadata.json`, jobData);
     setJobStatus(jobId, jobData);
@@ -48,13 +72,11 @@ router.post('/create', async (req, res) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Upload documents (ZIP) — streams browser → backend → S3.
-// This is now the ONLY upload path. The old presign-upload + confirm-upload
-// two-step flow has been removed; all data passes through the backend so auth
-// is enforced and S3 is never exposed to the client.
+// No presigned URL. Auth enforced by middleware above.
 // ─────────────────────────────────────────────────────────────────────────────
 router.post('/:jobId/upload', async (req, res) => {
   const { jobId } = req.params;
-  console.log(`[Upload] Starting for job: ${jobId}`);
+  console.log(`[Upload] Starting for job: ${jobId} by ${req.user.email}`);
   try {
     const busboy = Busboy({ headers: req.headers, limits: { fileSize: 4 * 1024 * 1024 * 1024 } });
     let uploadPromise = null, fileName = '', fileSize = 0;
@@ -84,7 +106,9 @@ router.post('/:jobId/upload', async (req, res) => {
   }
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
 // Upload single PDF
+// ─────────────────────────────────────────────────────────────────────────────
 router.post('/:jobId/upload-pdf', async (req, res) => {
   const { jobId } = req.params;
   try {
@@ -124,7 +148,9 @@ router.post('/:jobId/upload-pdf', async (req, res) => {
   }
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
 // Analyze PDF
+// ─────────────────────────────────────────────────────────────────────────────
 router.get('/:jobId/analyze-pdf', async (req, res) => {
   const { jobId } = req.params;
   try {
@@ -142,7 +168,9 @@ router.get('/:jobId/analyze-pdf', async (req, res) => {
   }
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
 // Start extraction
+// ─────────────────────────────────────────────────────────────────────────────
 router.post('/:jobId/extract', async (req, res) => {
   try {
     const { jobId } = req.params;
@@ -154,7 +182,9 @@ router.post('/:jobId/extract', async (req, res) => {
   }
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
 // Start analysis
+// ─────────────────────────────────────────────────────────────────────────────
 router.post('/:jobId/analyze', async (req, res) => {
   try {
     const { jobId } = req.params;
@@ -166,7 +196,9 @@ router.post('/:jobId/analyze', async (req, res) => {
   }
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
 // Resume interrupted job
+// ─────────────────────────────────────────────────────────────────────────────
 router.post('/:jobId/resume', async (req, res) => {
   try {
     const { jobId } = req.params;
@@ -198,8 +230,8 @@ router.post('/:jobId/resume', async (req, res) => {
 
     try {
       const metadata = await getJsonFromS3(`jobs/${jobId}/metadata.json`);
-      metadata.status    = 'processing';
-      metadata.resumedAt = new Date().toISOString();
+      metadata.status      = 'processing';
+      metadata.resumedAt   = new Date().toISOString();
       metadata.resumeCount = (metadata.resumeCount || 0) + 1;
       await putJsonToS3(`jobs/${jobId}/metadata.json`, metadata);
     } catch {}
@@ -218,7 +250,9 @@ router.post('/:jobId/resume', async (req, res) => {
   }
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
 // Generate report
+// ─────────────────────────────────────────────────────────────────────────────
 router.post('/:jobId/generate-report', async (req, res) => {
   try {
     const { jobId } = req.params;
@@ -229,7 +263,9 @@ router.post('/:jobId/generate-report', async (req, res) => {
   }
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
 // Get job status
+// ─────────────────────────────────────────────────────────────────────────────
 router.get('/:jobId/status', async (req, res) => {
   try {
     const { jobId } = req.params;
@@ -251,7 +287,9 @@ router.get('/:jobId/status', async (req, res) => {
   }
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
 // Get job logs
+// ─────────────────────────────────────────────────────────────────────────────
 router.get('/:jobId/logs', async (req, res) => {
   try {
     const { jobId } = req.params;
@@ -266,42 +304,63 @@ router.get('/:jobId/logs', async (req, res) => {
   }
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
 // SSE — live updates
+// Token accepted via ?token= query param because EventSource cannot send headers
+// ─────────────────────────────────────────────────────────────────────────────
 router.get('/:jobId/events', (req, res) => {
   const { jobId } = req.params;
+
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.flushHeaders();
-  res.write(`event: connected\ndata: ${JSON.stringify({ jobId })}\n\n`);
+
+  res.write(`event: connected\ndata: ${JSON.stringify({ jobId, user: req.user.email })}\n\n`);
   addSSEClient(jobId, res);
+
   const heartbeat = setInterval(() => {
     res.write(`event: heartbeat\ndata: ${JSON.stringify({ time: Date.now() })}\n\n`);
   }, 30000);
-  req.on('close', () => { clearInterval(heartbeat); removeSSEClient(jobId, res); });
+
+  req.on('close', () => {
+    clearInterval(heartbeat);
+    removeSSEClient(jobId, res);
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Download report — streams the Excel file from S3 through Express back to the
-// browser. S3 is never exposed directly; no presigned URL is generated.
+// Download report
 //
-// The browser receives the file as an attachment download, identical UX to
-// before but with the URL fully under backend control.
+// Streams the generated Excel report from S3 directly through Express to the
+// browser as a file download. S3 is never exposed — no presigned URL is used.
+//
+// Flow:  Browser → GET /api/jobs/:jobId/download (with Bearer token)
+//               → Backend fetches from S3 using IAM role
+//               → Streams binary .xlsx back to browser as attachment
+//
+// The frontend triggers this with:
+//   fetch(`/api/jobs/${jobId}/download`, {
+//     headers: { Authorization: `Bearer ${token}` }
+//   }).then(r => r.blob()).then(blob => { /* save file */ })
 // ─────────────────────────────────────────────────────────────────────────────
 router.get('/:jobId/download', async (req, res) => {
   const { jobId } = req.params;
+  console.log(`[Download] Report requested for job: ${jobId} by ${req.user.email}`);
+
   try {
     const reportKey = `jobs/${jobId}/output/Legal_Audit_Report.xlsx`;
-    console.log(`[Download] Streaming report for job: ${jobId}`);
 
+    // Verify report exists before streaming
     const s3Stream = await getFromS3(reportKey);
 
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename="Legal_Audit_Report_${jobId}.xlsx"`);
     res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
 
-    // Stream S3 object body directly to the HTTP response
+    // Stream S3 object body directly to HTTP response — no buffering in memory
     for await (const chunk of s3Stream) {
       res.write(chunk);
     }
@@ -311,6 +370,7 @@ router.get('/:jobId/download', async (req, res) => {
   } catch (error) {
     const is404 = error?.$metadata?.httpStatusCode === 404 || error?.name === 'NoSuchKey';
     if (is404) {
+      console.warn(`[Download] Report not found for job: ${jobId}`);
       return res.status(404).json({ error: 'Report not found. Has the job completed?' });
     }
     console.error(`[Download] Error streaming report for job ${jobId}:`, error.message);
@@ -318,7 +378,9 @@ router.get('/:jobId/download', async (req, res) => {
   }
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
 // List all jobs
+// ─────────────────────────────────────────────────────────────────────────────
 router.get('/', async (req, res) => {
   try {
     const { S3Client, ListObjectsV2Command } = await import('@aws-sdk/client-s3');
