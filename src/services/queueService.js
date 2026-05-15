@@ -11,12 +11,28 @@ let useInMemoryQueue = false;
 const inMemoryJobs = [];
 const jobHandlers = new Map();
 
+function sanitizeRedisUrl(rawUrl) {
+  // ioredis / Node URL parser chokes on special chars in the auth token
+  // (^, #, !, & etc). Parse the URL manually and re-encode just the password.
+  try {
+    // rediss://:TOKEN@HOST:PORT  — password starts after :// and ends at @
+    const match = rawUrl.match(/^(rediss?:\/\/:)([^@]+)(@.+)$/);
+    if (match) {
+      const [, scheme, token, rest] = match;
+      return scheme + encodeURIComponent(token) + rest;
+    }
+  } catch (_) {}
+  return rawUrl;
+}
+
 function createRedisConnection(name) {
-  const redisUrl = process.env.UPSTASH_REDIS_URL;
-  
-  if (!redisUrl) {
+  const rawUrl = process.env.UPSTASH_REDIS_URL;
+
+  if (!rawUrl) {
     return null;
   }
+
+  const redisUrl = sanitizeRedisUrl(rawUrl);
 
   const conn = new Redis(redisUrl, {
     maxRetriesPerRequest: null,
@@ -49,7 +65,7 @@ function createRedisConnection(name) {
 
 export async function initializeQueue() {
   const redisUrl = process.env.UPSTASH_REDIS_URL;
-  
+
   if (!redisUrl) {
     console.warn('⚠️  UPSTASH_REDIS_URL not set - using in-memory queue');
     useInMemoryQueue = true;
