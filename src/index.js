@@ -187,22 +187,13 @@ app.use((err, req, res, next) => {
 // ─────────────────────────────────────────────────────────────
 async function start() {
   try {
+    // ── Step 1: Load secrets first (required before anything else) ──────────
     await loadSecrets();
 
-    console.log('Initializing queue...');
-    const queueResult = await initializeQueue();
-    if (queueResult.useInMemory) {
-      console.log('✓ Using in-memory queue');
-    } else {
-      console.log('✓ Redis queue initialized');
-    }
-
-    await initializeS3Bucket();
-    console.log('✓ S3 bucket initialized');
-
-    await initializeWorker();
-    console.log('✓ Document processing worker initialized');
-
+    // ── Step 2: Start HTTP server IMMEDIATELY so ALB health checks pass ─────
+    // Redis and S3 initialization happens in the background AFTER the server
+    // is already listening. This prevents ALB from marking the task unhealthy
+    // during the Redis retry window (which can take 15+ seconds on cold start).
     app.listen(PORT, () => {
       console.log(`✓ Server running on port ${PORT}`);
       console.log(`  Environment:          ${process.env.NODE_ENV || 'development'}`);
@@ -210,7 +201,33 @@ async function start() {
       console.log(`  Frontend S3 prefix:   ${FRONTEND_S3_PREFIX}`);
       console.log(`  App Bucket:           ${process.env.S3_BUCKET_NAME}`);
     });
+
+    // ── Step 3: Initialize everything else in background ────────────────────
+    // Errors here are logged but do NOT crash the server — the app stays up
+    // and retries are handled inside each init function.
+    (async () => {
+      try {
+        console.log('Initializing queue...');
+        const queueResult = await initializeQueue();
+        if (queueResult.useInMemory) {
+          console.log('✓ Using in-memory queue');
+        } else {
+          console.log('✓ Redis queue initialized');
+        }
+
+        await initializeS3Bucket();
+        console.log('✓ S3 bucket initialized');
+
+        await initializeWorker();
+        console.log('✓ Document processing worker initialized');
+      } catch (bgError) {
+        console.error('Background initialization error:', bgError.message);
+        // Do NOT call process.exit() — server stays up, ALB stays healthy
+      }
+    })();
+
   } catch (error) {
+    // Only secrets failure should crash the server
     console.error('Failed to start server:', error);
     process.exit(1);
   }
