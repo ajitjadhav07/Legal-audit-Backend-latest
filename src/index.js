@@ -25,9 +25,18 @@ app.use(cors({
   credentials: true
 }));
 
-// Body parser limits for large JSON payloads
-app.use(express.json({ limit: '100mb' }));
-app.use(express.urlencoded({ limit: '100mb', extended: true }));
+// Body parser — skip for multipart upload routes (Busboy handles those directly)
+// Applying body parser to multipart streams can corrupt or prematurely consume
+// the request body before Busboy gets it, causing silent upload failures.
+app.use((req, res, next) => {
+  const isUpload = req.path.includes('/upload') && req.method === 'POST';
+  const isMultipart = (req.headers['content-type'] || '').includes('multipart/form-data');
+  if (isUpload && isMultipart) return next(); // skip body parser for uploads
+  express.json({ limit: '100mb' })(req, res, (err) => {
+    if (err) return next(err);
+    express.urlencoded({ limit: '100mb', extended: true })(req, res, next);
+  });
+});
 
 // ─────────────────────────────────────────────────────────────
 // S3 bucket configuration
@@ -194,13 +203,22 @@ async function start() {
     // Redis and S3 initialization happens in the background AFTER the server
     // is already listening. This prevents ALB from marking the task unhealthy
     // during the Redis retry window (which can take 15+ seconds on cold start).
-    app.listen(PORT, () => {
+    const server = app.listen(PORT, () => {
       console.log(`✓ Server running on port ${PORT}`);
       console.log(`  Environment:          ${process.env.NODE_ENV || 'development'}`);
       console.log(`  Frontend Bucket:      ${FRONTEND_BUCKET}`);
       console.log(`  Frontend S3 prefix:   ${FRONTEND_S3_PREFIX}`);
       console.log(`  App Bucket:           ${process.env.S3_BUCKET_NAME}`);
     });
+
+    // ── Timeouts for large file uploads (4GB+ ZIPs) ──────────────────────
+    // Default Node.js keepAliveTimeout is 5s and headersTimeout is 60s —
+    // both will kill a long-running upload before it completes.
+    // Set to 0 (disabled) so the ALB idle_timeout (4000s) is the only limit.
+    server.keepAliveTimeout  = 0;
+    server.headersTimeout    = 0;
+    server.requestTimeout    = 0;
+    server.timeout           = 0;   // socket inactivity timeout
 
     // ── Step 3: Initialize everything else in background ────────────────────
     // Errors here are logged but do NOT crash the server — the app stays up
