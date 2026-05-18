@@ -5,8 +5,10 @@ import pdf from 'pdf-parse';
 import { PDFDocument } from 'pdf-lib';
 import {
   getWorkerConnection, isUsingInMemoryQueue,
-  broadcastToJob, updateJobStatus, registerJobHandler
+  broadcastToJob, updateJobStatus, registerJobHandler,
+  initializeQueue
 } from '../services/queueService.js';
+import { loadSecrets } from '../config/secrets.js';
 import { getFromS3, uploadToS3, getJsonFromS3, putJsonToS3 } from '../services/s3Service.js';
 import { generateAuditReport } from '../services/excelService.js';
 
@@ -518,10 +520,32 @@ export async function initializeWorker() {
 
 export { worker };
 
-console.log('[Worker] Starting...');
-initializeWorker()
-  .then(() => console.log('[Worker] Ready'))
-  .catch(e  => { console.error('[Worker] Fatal:', e); process.exit(1); });
+async function start() {
+  console.log('[Worker] Starting...');
+  try {
+    // Step 1 — Load secrets so UPSTASH_REDIS_URL is in process.env
+    await loadSecrets();
+    console.log('[Worker] Secrets loaded');
+
+    // Step 2 — Initialize Redis connections (sanitizeRedisUrl handles special chars)
+    const queueResult = await initializeQueue();
+    if (queueResult.useInMemory) {
+      console.log('[Worker] ⚠️  Redis unavailable — using in-memory queue');
+      console.log('[Worker]    Jobs queued by backend will NOT reach this worker!');
+    } else {
+      console.log('[Worker] ✓ Redis queue connected');
+    }
+
+    // Step 3 — Start BullMQ worker with the Redis connection
+    await initializeWorker();
+    console.log('[Worker] Ready');
+  } catch (e) {
+    console.error('[Worker] Fatal:', e);
+    process.exit(1);
+  }
+}
+
+start();
 
 process.on('SIGTERM', () => { console.log('[Worker] SIGTERM'); process.exit(0); });
 process.on('SIGINT',  () => { console.log('[Worker] SIGINT');  process.exit(0); });
