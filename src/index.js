@@ -21,7 +21,7 @@ const PORT = process.env.PORT || 3001;
 // so CORS is not triggered. Keep it here for local convenience.
 // ─────────────────────────────────────────────────────────────
 app.use(cors({
-  origin: process.env.FRONTEND_URL || 'https://legalaudit.agentichumans.in',
+  origin: process.env.FRONTEND_URL || 'https://afllriuat.axisb.com',
   credentials: true
 }));
 
